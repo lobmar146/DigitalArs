@@ -1,0 +1,14 @@
+**/bin
+**/obj
+**/node_modules
+**/dist
+.git
+.vs
+**/.env*
+**/Properties/launchSettings.json
+**/*.pfx
+**/*.pem
+frontend
+docs
+database
+tools
