@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: digitalars-api
+    runtime: docker
+    plan: free
+    branch: deploy
+    region: virginia
+    dockerfilePath: ./backend/DigitalArs.Api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+      - key: ASPNETCORE_HTTP_PORTS
+        value: "10000"
+      - key: Hosting__BehindRenderProxy
+        value: "true"
+      - key: DataProtection__PersistToDatabase
+        value: "true"
+      - key: ConnectionStrings__DefaultConnection
+        sync: false
+      - key: Jwt__Key
+        generateValue: true
+      - key: Cors__AllowedOrigins__0
+        sync: false
+      - key: Email__FrontendBaseUrl
+        sync: false
+      - key: Email__Host
+        sync: false
+      - key: Email__Port
+        value: "2525"
+      - key: Email__EnableSsl
+        value: "true"
+      - key: Email__User
+        sync: false
+      - key: Email__Password
+        sync: false
+      - key: Email__From
+        sync: false

@@ -21,6 +21,8 @@ using DigitalArs.Api.Repositories;
 using DigitalArs.Api.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Data.SqlClient;
@@ -37,6 +39,19 @@ using Microsoft.IdentityModel.Tokens;
 // define Properties/launchSettings.json y en un servidor define el entorno.
 
 var builder = WebApplication.CreateBuilder(args);
+// Render termina TLS en su proxy. Solo confiamos en la red privada del proxy,
+// y procesamos un salto; nunca aceptamos encabezados de cualquier IP pública.
+if (builder.Configuration.GetValue<bool>("Hosting:BehindRenderProxy"))
+{
+    builder.Services.Configure<ForwardedHeadersOptions>(options =>
+    {
+        options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+        options.ForwardLimit = 1;
+        options.KnownIPNetworks.Add(System.Net.IPNetwork.Parse("10.0.0.0/8"));
+        options.KnownIPNetworks.Add(System.Net.IPNetwork.Parse("172.16.0.0/12"));
+        options.KnownIPNetworks.Add(System.Net.IPNetwork.Parse("192.168.0.0/16"));
+    });
+}
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
 // Cortar acá y no en la primera consulta: un error de arranque con instrucciones
@@ -95,6 +110,13 @@ builder.Services.AddIdentityCore<IdentityUser>(options =>
 // coincidir con Invitacion.ExpiraEnSegundos, que es el que se le informa al
 // frontend: un día.
 builder.Services.Configure<DataProtectionTokenProviderOptions>(options => options.TokenLifespan = TimeSpan.FromDays(1));
+
+if (builder.Configuration.GetValue<bool>("DataProtection:PersistToDatabase"))
+{
+    builder.Services.AddDbContext<DataProtectionDbContext>(options => options.UseSqlServer(connectionString));
+    builder.Services.AddDataProtection().SetApplicationName("DigitalArs")
+        .PersistKeysToDbContext<DataProtectionDbContext>();
+}
 
 // -----------------------------------------------------------------------------
 // 4. Servicios propios
@@ -359,7 +381,14 @@ _ = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<JwtOpt
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<DigitalArsDbContext>();
-    if (!await db.Database.CanConnectAsync())
+    // Una base serverless pausada puede rechazar el primer intento al despertar.
+    var connected = false;
+    for (var attempt = 0; attempt < 6; attempt++)
+    {
+        if (await db.Database.CanConnectAsync()) { connected = true; break; }
+        if (attempt < 5) await Task.Delay(TimeSpan.FromSeconds(10));
+    }
+    if (!connected)
         throw new InvalidOperationException("No fue posible conectar con SQL Server. Revisá DefaultConnection y el servicio SQL Server.");
 }
 
@@ -379,12 +408,15 @@ if (app.Environment.IsDevelopment())
 // inverso. Mover una línea de lugar cambia el comportamiento.
 
 app.UseExceptionHandler();   // primero de todo: así envuelve lo que falle más adentro
+app.UseForwardedHeaders();  // restaura HTTPS y la IP antes de redirección y rate limiting
 app.UseHttpsRedirection();   // manda a HTTPS antes de procesar nada
 app.UseCors("Frontend");     // antes de autenticar: el preflight OPTIONS viaja sin token
 app.UseAuthentication();     // ¿quién sos? lee el Bearer y arma la identidad
 app.UseAuthorization();      // ¿podés? aplica [Authorize] y la FallbackPolicy
 app.UseRateLimiter();        // aplica la política "auth" donde el controller la pide
 app.MapControllers();        // los endpoints REST
+// Liveness sin consultar SQL: los chequeos del hosting no mantienen la base despierta.
+app.MapGet("/health", () => Results.Ok(new { status = "ok" })).AllowAnonymous();
 app.MapHub<NotificacionesHub>("/hubs/notificaciones"); // el WebSocket de las notificaciones
 
 // Nota sobre el orden: el rate limiter quedó después de la autorización, así que un
