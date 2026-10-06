@@ -106,6 +106,21 @@ Rota su security stamp; volver a iniciar sesión después. No hay endpoint de bo
 - Comprobar notificaciones SignalR y una operación entre cuentas de demo.
 - Reabrir el sitio después de la suspensión del backend y SQL.
 
+## Demora al despertar
+
+Pensado para que la demo se pueda mostrar en un portfolio sin que parezca rota:
+
+- **API despierta:** `.github/workflows/mantener-api-despierta.yml` llama a `/health` cada 10 minutos.
+  GitHub solo programa workflows desde `main`, así que el archivo tiene que estar en esa rama.
+  Encendida todo el mes consume unas 744 de las 750 horas gratuitas del workspace de Render:
+  si hay otro servicio gratuito en el mismo workspace, acotar el `cron` a un horario.
+- **Base pausada:** Azure SQL no se mantiene despierta a propósito, porque agotaría el cupo gratuito y
+  quedaría pausada hasta el mes siguiente. La API reintenta abrir la conexión durante unos 75 segundos
+  (`RetryLogicProvider` en `Program.cs`), así que el primer pedido espera en lugar de fallar.
+- **Aviso al visitante:** si un pedido tarda más de 4 segundos, el front muestra "Despertando el
+  servidor…" (`AvisoServidorDespertando.jsx`) y reintenta los GET que fallan por conexión o con
+  502/503/504. Los POST no se repiten, para no duplicar operaciones.
+
 ## Límites verificados el 29/09/2026
 
 - [Vercel Hobby](https://vercel.com/docs/plans/hobby): uso personal y no comercial; adecuado para esta demo educativa.

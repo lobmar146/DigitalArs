@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import axios from 'axios'
-import { api, apiRequest } from '../src/context/api.js'
+import { api, apiRequest, reintentos, servidorDespertando } from '../src/context/api.js'
 
 // El adapter es el punto donde Axios hace la llamada real. Reemplazarlo nos deja
 // probar el mapeo de respuestas y errores sin levantar la API.
@@ -55,6 +55,59 @@ test('presenta validaciones de Identity', async t => {
 test('maneja 429 sin cuerpo JSON', async t => {
   usarAdapter(t, fallar(429, ''))
   await assert.rejects(apiRequest('/api/auth/login'), { status: 429, message: 'Demasiados intentos. Esperá un minuto y volvé a intentar.' })
+})
+
+// Las esperas reales llegan a 21 segundos: en los tests se reintenta sin esperar.
+reintentos.esperasMs = [0, 0, 0]
+
+test('reintenta un GET mientras el servidor despierta', async t => {
+  let intentos = 0
+  usarAdapter(t, config => {
+    intentos++
+    if (intentos === 1) return Promise.reject(Object.assign(new Error('Network Error'), { isAxiosError: true }))
+    if (intentos === 2) return fallar(503, '')()
+    return responder({ saldo: 10 })(config)
+  })
+  assert.deepEqual(await apiRequest('/api/cuentas/me'), { saldo: 10 })
+  assert.equal(intentos, 3)
+})
+
+test('no reintenta un POST para no duplicar operaciones', async t => {
+  let intentos = 0
+  usarAdapter(t, () => {
+    intentos++
+    return fallar(503, '')()
+  })
+  await assert.rejects(apiRequest('/api/transferencias', { method: 'POST', body: {} }), { status: 503 })
+  assert.equal(intentos, 1)
+})
+
+test('no reintenta un error 500 de la propia API', async t => {
+  let intentos = 0
+  usarAdapter(t, () => {
+    intentos++
+    return fallar(500, { message: 'Falló.' })()
+  })
+  await assert.rejects(apiRequest('/api/usuarios'), { status: 500 })
+  assert.equal(intentos, 1)
+})
+
+test('avisa que el servidor despierta mientras un pedido viene demorado', async t => {
+  const avisoOriginal = reintentos.avisarDespuesDeMs
+  reintentos.avisarDespuesDeMs = 0
+  t.after(() => { reintentos.avisarDespuesDeMs = avisoOriginal })
+
+  let responderAhora
+  usarAdapter(t, config => new Promise(resolve => {
+    responderAhora = () => resolve({ data: null, status: 204, statusText: '', headers: {}, config })
+  }))
+  const pedido = apiRequest('/api/usuarios')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(servidorDespertando(), true)
+
+  responderAhora()
+  await pedido
+  assert.equal(servidorDespertando(), false)
 })
 
 test('fallo de red tiene un mensaje útil', async t => {

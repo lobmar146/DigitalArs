@@ -18,6 +18,7 @@ import BarraLateral, { ANCHO_DE_LA_BARRA_LATERAL } from './components/Navegacion
 import EncabezadoDeSesion from './components/Navegacion/EncabezadoDeSesion'
 import BarraInferior from './components/Navegacion/BarraInferior'
 import AvisoDeNotificacion from './components/Notificaciones/AvisoDeNotificacion'
+import AvisoServidorDespertando from './components/Comunes/AvisoServidorDespertando'
 import useShell from './hooks/useShell'
 import { SHELL_ESCRITORIO, SHELL_MOBILE } from './routes/shellUtils'
 
@@ -106,6 +107,7 @@ function App() {
       </Box>
 
       <AvisoDeNotificacion />
+      <AvisoServidorDespertando />
     </ThemeProvider>
   )
 }

@@ -75,7 +75,23 @@ if (string.IsNullOrWhiteSpace(connectionString))
 // las tablas de Identity y las de negocio: si el alta del perfil falla, tampoco
 // queda creada la cuenta de acceso.
 
-builder.Services.AddScoped(_ => new SqlConnection(connectionString));
+//
+// La base en Azure SQL serverless se pausa cuando nadie la usa y tarda hasta un
+// minuto en reanudarse; mientras tanto rechaza las conexiones con errores
+// transitorios (40613, entre otros). El RetryLogicProvider reintenta la APERTURA
+// de la conexión con espera creciente (2 s, 4 s, 8 s… hasta 15 s, unos 75 s en
+// total), así el primer pedido después de una pausa espera en lugar de fallar.
+// No se usa EnableRetryOnFailure de EF porque choca con las transacciones
+// manuales de los servicios (AccountService, TransferenciaService, etc.).
+builder.Services.AddScoped(_ => new SqlConnection(connectionString)
+{
+    RetryLogicProvider = SqlConfigurableRetryFactory.CreateExponentialRetryProvider(new SqlRetryLogicOption
+    {
+        NumberOfTries = 8,
+        DeltaTime = TimeSpan.FromSeconds(2),
+        MaxTimeInterval = TimeSpan.FromSeconds(15)
+    })
+});
 builder.Services.AddDbContext<DigitalArsDbContext>((sp, options) =>
     options.UseSqlServer(sp.GetRequiredService<SqlConnection>()));
 builder.Services.AddDbContext<AuthDbContext>((sp, options) =>
@@ -113,7 +129,8 @@ builder.Services.Configure<DataProtectionTokenProviderOptions>(options => option
 
 if (builder.Configuration.GetValue<bool>("DataProtection:PersistToDatabase"))
 {
-    builder.Services.AddDbContext<DataProtectionDbContext>(options => options.UseSqlServer(connectionString));
+    // Este contexto no abre transacciones propias, así que acá sí sirve el reintento de EF.
+    builder.Services.AddDbContext<DataProtectionDbContext>(options => options.UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure()));
     builder.Services.AddDataProtection().SetApplicationName("DigitalArs")
         .PersistKeysToDbContext<DataProtectionDbContext>();
 }

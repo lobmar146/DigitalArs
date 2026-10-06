@@ -8,23 +8,90 @@ const baseURL = (
 // Instancia única de Axios: todas las llamadas de la app salen desde acá.
 export const api = axios.create({ baseURL })
 
-export async function apiRequest(
-  path,
-  { token, body, signal, method = 'GET', params } = {}
-) {
+// La API publicada corre en el plan gratuito de Render, que la apaga a los 15 minutos sin uso,
+// y la base en Azure SQL serverless, que también se pausa. El primer pedido después de una pausa
+// puede tardar hasta un minuto. Para que quien entra no crea que la app está rota:
+// - un pedido que tarda más de avisarDespuesDeMs enciende el aviso de "servidor despertando";
+// - los GET que fallan por conexión o con 502/503/504 se reintentan con estas esperas. Solo los
+//   GET: repetir un POST podría duplicar una transferencia.
+// Es un objeto exportado para que los tests puedan acortar las esperas.
+export const reintentos = { esperasMs: [3000, 6000, 12000], avisarDespuesDeMs: 4000 }
+
+let pedidosLentos = 0
+const oyentesDelServidor = new Set()
+
+// Pensadas para useSyncExternalStore: el aviso se suscribe y lee si hay algún pedido demorado.
+export function suscribirseAlServidor(oyente) {
+  oyentesDelServidor.add(oyente)
+  return () => oyentesDelServidor.delete(oyente)
+}
+
+export function servidorDespertando() {
+  return pedidosLentos > 0
+}
+
+function cambiarPedidosLentos(diferencia) {
+  pedidosLentos += diferencia
+  oyentesDelServidor.forEach(oyente => oyente())
+}
+
+export async function apiRequest(path, opciones = {}) {
+  let esLento = false
+  const temporizador = setTimeout(() => {
+    esLento = true
+    cambiarPedidosLentos(1)
+  }, reintentos.avisarDespuesDeMs)
+
   try {
-    const response = await api.request({
-      url: path,
-      method,
-      signal,
-      ...(params ? { params } : {}),
-      ...(body ? { data: body } : {}),
-      ...(token ? { headers: { Authorization: 'Bearer ' + token } } : {})
-    })
-    return contenidoDe(response)
-  } catch (error) {
-    throw traducirError(error)
+    return await pedirConReintentos(path, opciones)
+  } finally {
+    clearTimeout(temporizador)
+    if (esLento) cambiarPedidosLentos(-1)
   }
+}
+
+async function pedirConReintentos(path, { token, body, signal, method = 'GET', params } = {}) {
+  const esperas = method.toUpperCase() === 'GET' ? reintentos.esperasMs : []
+
+  for (let intento = 0; ; intento++) {
+    try {
+      const response = await api.request({
+        url: path,
+        method,
+        signal,
+        ...(params ? { params } : {}),
+        ...(body ? { data: body } : {}),
+        ...(token ? { headers: { Authorization: 'Bearer ' + token } } : {})
+      })
+      return contenidoDe(response)
+    } catch (error) {
+      if (intento < esperas.length && esReintentable(error) && !signal?.aborted) {
+        await esperar(esperas[intento], signal)
+        continue
+      }
+      throw traducirError(error)
+    }
+  }
+}
+
+// Sin respuesta (la API todavía arranca) o un 502/503/504 del proxy de Render. Un 500 no: ese
+// error lo armó la propia API y repetir el pedido daría lo mismo.
+function esReintentable(error) {
+  if (error.name === 'AbortError' || axios.isCancel(error)) return false
+  if (!error.response) return true
+  return [502, 503, 504].includes(error.response.status)
+}
+
+// Si cancelan la carga durante la espera, se corta enseguida: el próximo intento sale con la
+// señal ya abortada y termina como AbortError.
+function esperar(ms, signal) {
+  return new Promise(resolve => {
+    const temporizador = setTimeout(resolve, ms)
+    signal?.addEventListener('abort', () => {
+      clearTimeout(temporizador)
+      resolve()
+    }, { once: true })
+  })
 }
 
 // Un 204 no trae cuerpo y Axios lo entrega como cadena vacía: lo normalizamos a null.
@@ -49,7 +116,7 @@ function errorDeCancelacion() {
 
 function errorDeConexion(cause) {
   return new Error(
-    'No pudimos conectar con la API. Comprobá que esté iniciada y volvé a intentar.',
+    'No pudimos conectar con el servidor. Puede estar despertándose: esperá un momento y volvé a intentar.',
     { cause }
   )
 }
