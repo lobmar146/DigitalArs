@@ -1,0 +1,28 @@
+# Mantiene despierta la API publicada en Render: el plan gratuito la apaga a los 15 minutos sin
+# uso y el primer visitante tiene que esperar casi un minuto a que arranque.
+#
+# Solo llama a /health, que no consulta la base: Azure SQL se sigue pausando sola y no gasta el
+# cupo mensual de la oferta gratuita. La espera de la base la cubren el reintento de conexión de
+# la API y el aviso "Despertando el servidor…" del front.
+#
+# Ojo: GitHub ejecuta los workflows programados solo desde la rama por defecto (main), puede
+# demorarlos unos minutos en horas pico y los desactiva tras 60 días sin actividad en el repo.
+name: Mantener despierta la API
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Llamar a /health
+        run: >-
+          curl --fail --silent --show-error
+          --retry 5 --retry-delay 15 --retry-all-errors --max-time 90
+          https://digitalars-api.onrender.com/health
