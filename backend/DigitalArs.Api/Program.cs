@@ -399,14 +399,30 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<DigitalArsDbContext>();
     // Una base serverless pausada puede rechazar el primer intento al despertar.
-    var connected = false;
+    // No se usa CanConnectAsync porque se traga la excepción, y sin ella el log de
+    // Render no dice si falló el firewall, el usuario o la base.
+    var logger = app.Services.GetRequiredService<ILogger<Program>>();
+    Exception? lastError = null;
     for (var attempt = 0; attempt < 6; attempt++)
     {
-        if (await db.Database.CanConnectAsync()) { connected = true; break; }
+        try
+        {
+            await db.Database.OpenConnectionAsync();
+            await db.Database.CloseConnectionAsync();
+            lastError = null;
+            break;
+        }
+        catch (Exception ex)
+        {
+            lastError = ex;
+            logger.LogWarning("Intento {Intento} de conectar con SQL Server falló: {Motivo}", attempt + 1, ex.Message);
+        }
         if (attempt < 5) await Task.Delay(TimeSpan.FromSeconds(10));
     }
-    if (!connected)
-        throw new InvalidOperationException("No fue posible conectar con SQL Server. Revisá DefaultConnection y el servicio SQL Server.");
+    if (lastError is not null)
+        throw new InvalidOperationException(
+            "No fue posible conectar con SQL Server. Revisá DefaultConnection y el servicio SQL Server. " +
+            "Último error: " + lastError.Message, lastError);
 }
 
 // Swagger solo en Development: en producción no se publica la documentación.
