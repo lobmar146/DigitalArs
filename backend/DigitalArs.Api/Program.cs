@@ -74,22 +74,29 @@ if (string.IsNullOrWhiteSpace(connectionString))
 // lo que le permite a AccountService abrir una transacción que abarque a la vez
 // las tablas de Identity y las de negocio: si el alta del perfil falla, tampoco
 // queda creada la cuenta de acceso.
-
 //
 // La base en Azure SQL serverless se pausa cuando nadie la usa y tarda hasta un
-// minuto en reanudarse; mientras tanto rechaza las conexiones con errores
-// transitorios (40613, entre otros). El RetryLogicProvider reintenta la APERTURA
-// de la conexión con espera creciente (2 s, 4 s, 8 s… hasta 15 s, unos 75 s en
-// total), así el primer pedido después de una pausa espera en lugar de fallar.
+// minuto en reanudarse; mientras tanto rechaza las conexiones. El
+// RetryLogicProvider reintenta la APERTURA de la conexión con espera creciente
+// (2 s, 4 s, 8 s… hasta 15 s, unos 75 s en total), así el primer pedido después
+// de una pausa espera en lugar de fallar.
 // No se usa EnableRetryOnFailure de EF porque choca con las transacciones
 // manuales de los servicios (AccountService, TransferenciaService, etc.).
+//
+// Los errores de conexión que se reintentan. 40925 ("Can not connect to the
+// database in its current state") es el que devuelve la base mientras se
+// reanuda, y SqlClient no lo incluye en su lista por defecto.
+int[] erroresSqlTransitorios =
+    [40925, 40613, 40197, 40501, 49918, 49919, 49920, 4060, 10928, 10929, 10053, 10054, 10060, 233, 64, 20];
+
 builder.Services.AddScoped(_ => new SqlConnection(connectionString)
 {
     RetryLogicProvider = SqlConfigurableRetryFactory.CreateExponentialRetryProvider(new SqlRetryLogicOption
     {
         NumberOfTries = 8,
         DeltaTime = TimeSpan.FromSeconds(2),
-        MaxTimeInterval = TimeSpan.FromSeconds(15)
+        MaxTimeInterval = TimeSpan.FromSeconds(15),
+        TransientErrors = erroresSqlTransitorios
     })
 });
 builder.Services.AddDbContext<DigitalArsDbContext>((sp, options) =>
@@ -130,7 +137,7 @@ builder.Services.Configure<DataProtectionTokenProviderOptions>(options => option
 if (builder.Configuration.GetValue<bool>("DataProtection:PersistToDatabase"))
 {
     // Este contexto no abre transacciones propias, así que acá sí sirve el reintento de EF.
-    builder.Services.AddDbContext<DataProtectionDbContext>(options => options.UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure()));
+    builder.Services.AddDbContext<DataProtectionDbContext>(options => options.UseSqlServer(connectionString, sql => sql.EnableRetryOnFailure(6, TimeSpan.FromSeconds(30), [40925])));
     builder.Services.AddDataProtection().SetApplicationName("DigitalArs")
         .PersistKeysToDbContext<DataProtectionDbContext>();
 }
@@ -389,6 +396,7 @@ var app = builder.Build();
 // -----------------------------------------------------------------------------
 // Las dos comprobaciones siguientes existen para fallar temprano y con un motivo
 // claro, en vez de dejar la API en pie y que el primer usuario se coma el error.
+// La excepción es la base fuera de Development, explicada más abajo.
 
 // Pedir el valor fuerza la validación de JwtOptions declarada en la sección 6.
 _ = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<JwtOptions>>().Value;
@@ -398,31 +406,28 @@ _ = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<JwtOpt
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<DigitalArsDbContext>();
-    // Una base serverless pausada puede rechazar el primer intento al despertar.
-    // No se usa CanConnectAsync porque se traga la excepción, y sin ella el log de
-    // Render no dice si falló el firewall, el usuario o la base.
-    var logger = app.Services.GetRequiredService<ILogger<Program>>();
-    Exception? lastError = null;
-    for (var attempt = 0; attempt < 6; attempt++)
+    // La apertura ya reintenta mientras la base serverless despierta (sección 2).
+    // No se usa CanConnectAsync porque se traga la excepción, y sin ella el log no
+    // dice si falló el firewall, el usuario o la base.
+    try
     {
-        try
-        {
-            await db.Database.OpenConnectionAsync();
-            await db.Database.CloseConnectionAsync();
-            lastError = null;
-            break;
-        }
-        catch (Exception ex)
-        {
-            lastError = ex;
-            logger.LogWarning("Intento {Intento} de conectar con SQL Server falló: {Motivo}", attempt + 1, ex.Message);
-        }
-        if (attempt < 5) await Task.Delay(TimeSpan.FromSeconds(10));
+        await db.Database.OpenConnectionAsync();
+        await db.Database.CloseConnectionAsync();
     }
-    if (lastError is not null)
+    catch (Exception ex) when (!app.Environment.IsDevelopment())
+    {
+        // En la nube la API arranca igual: si se cayera, el hosting la reiniciaría
+        // en bucle mientras la base termina de despertar, y /health nunca
+        // respondería. Los pedidos que usan la base vuelven a intentar al llegar.
+        app.Services.GetRequiredService<ILogger<Program>>().LogError(
+            "No fue posible conectar con SQL Server al arrancar; la API sigue en pie. Motivo: {Motivo}", ex.Message);
+    }
+    catch (Exception ex)
+    {
         throw new InvalidOperationException(
             "No fue posible conectar con SQL Server. Revisá DefaultConnection y el servicio SQL Server. " +
-            "Último error: " + lastError.Message, lastError);
+            "Motivo: " + ex.Message, ex);
+    }
 }
 
 // Swagger solo en Development: en producción no se publica la documentación.
