@@ -117,6 +117,9 @@ Pensado para que la demo se pueda mostrar en un portfolio sin que parezca rota:
 - **Base pausada:** Azure SQL no se mantiene despierta a propósito, porque agotaría el cupo gratuito y
   quedaría pausada hasta el mes siguiente. La API reintenta abrir la conexión durante unos 75 segundos
   (`RetryLogicProvider` en `Program.cs`), así que el primer pedido espera en lugar de fallar.
+  Si al arrancar la base no responde por su estado (pausada, despertando, suscripción deshabilitada:
+  error 40925), la API arranca igual y lo registra en el log. Si el motivo es de configuración
+  (contraseña, servidor o firewall), la API no arranca y el deploy falla con el error de SQL.
 - **Aviso al visitante:** si un pedido tarda más de 4 segundos, el front muestra "Despertando el
   servidor…" (`AvisoServidorDespertando.jsx`) y reintenta los GET que fallan por conexión o con
   502/503/504. Los POST no se repiten, para no duplicar operaciones.

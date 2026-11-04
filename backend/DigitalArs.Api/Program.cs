@@ -414,11 +414,12 @@ using (var scope = app.Services.CreateScope())
         await db.Database.OpenConnectionAsync();
         await db.Database.CloseConnectionAsync();
     }
-    catch (Exception ex) when (!app.Environment.IsDevelopment())
+    catch (Exception ex) when (!app.Environment.IsDevelopment() && !EsErrorDeConfiguracion(ex))
     {
-        // En la nube la API arranca igual: si se cayera, el hosting la reiniciaría
-        // en bucle mientras la base termina de despertar, y /health nunca
-        // respondería. Los pedidos que usan la base vuelven a intentar al llegar.
+        // Un error de estado (base pausada, despertando o con la suscripción
+        // deshabilitada) se arregla solo. En la nube la API arranca igual: si se
+        // cayera, el hosting la reiniciaría en bucle y /health nunca respondería.
+        // Los pedidos que usan la base vuelven a intentar al llegar.
         app.Services.GetRequiredService<ILogger<Program>>().LogError(
             "No fue posible conectar con SQL Server al arrancar; la API sigue en pie. Motivo: {Motivo}", ex.Message);
     }
@@ -429,6 +430,15 @@ using (var scope = app.Services.CreateScope())
             "Motivo: " + ex.Message, ex);
     }
 }
+
+// Errores que reintentar no arregla, porque la configuración está mal: cadena de
+// conexión con formato inválido, usuario o contraseña incorrectos (18456), servidor
+// o login inexistente (40532), o la IP del hosting fuera del firewall (40615).
+// Con estos la API no arranca, ni siquiera en la nube, así el deploy falla con un
+// motivo claro en vez de quedar en pie sin poder usar la base.
+static bool EsErrorDeConfiguracion(Exception ex) =>
+    ex is ArgumentException ||
+    (ex is SqlException sql && sql.Errors.Cast<SqlError>().Any(e => e.Number is 18456 or 40532 or 40615));
 
 // Swagger solo en Development: en producción no se publica la documentación.
 if (app.Environment.IsDevelopment())
